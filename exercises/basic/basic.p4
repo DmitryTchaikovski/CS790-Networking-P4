@@ -52,8 +52,17 @@ parser MyParser(packet_in packet,
                 inout standard_metadata_t standard_metadata) {
 
     state start {
-        /* TODO: add parser logic */
-        transition accept;
+        packet.extract(hdr.ethernet);
+        // Transition based on EtherType
+        transition select(hdr.ethernet.etherType) {
+            TYPE_IPV4: parse_ipv4; // If IPv4, parse it
+            default: accept;       // Otherwise, accept (stop parsing here)
+        }
+    }
+
+    state parse_ipv4 {
+        packet.extract(hdr.ipv4);
+        transition accept; // Finished parsing known headers
     }
 }
 
@@ -62,7 +71,7 @@ parser MyParser(packet_in packet,
 ************   C H E C K S U M    V E R I F I C A T I O N   *************
 *************************************************************************/
 
-control MyVerifyChecksum(inout headers hdr, inout metadata meta) {   
+control MyVerifyChecksum(inout headers hdr, inout metadata meta) {
     apply {  }
 }
 
@@ -74,32 +83,65 @@ control MyVerifyChecksum(inout headers hdr, inout metadata meta) {
 control MyIngress(inout headers hdr,
                   inout metadata meta,
                   inout standard_metadata_t standard_metadata) {
+
     action drop() {
-        mark_to_drop(standard_metadata);
+        // Mark the packet to be dropped
+        mark_to_drop(); // Remove parameters to get it to compile
     }
-    
+
+    // Action to forward IPv4 packets
     action ipv4_forward(macAddr_t dstAddr, egressSpec_t port) {
-        /* TODO: fill out code in action body */
+        // Set the egress port
+        standard_metadata.egress_spec = port;
+        // Set the destination MAC 
+        hdr.ethernet.srcAddr = hdr.ethernet.dstAddr;
+
+        // Rewrite the destination MAC
+        hdr.ethernet.dstAddr = dstAddr;
+
+        // Decrement IPv4 TTL. Assuming hdr.ipv4.isValid() and ttl > 0 checked already.
+        // If ttl is 1 it becomes 0. If it's 0,  then it wrapped around ( 255),
+        // which is why we check for ttl == 0 AFTER this action in the apply block.
+        hdr.ipv4.ttl = hdr.ipv4.ttl - 1;
+
+        // Source MAC address (hdr.ethernet.srcAddr) is probably should be rewritten
+        // by the egress pipeline on the egress port's MAC address.
     }
-    
+
     table ipv4_lpm {
         key = {
-            hdr.ipv4.dstAddr: lpm;
+            hdr.ipv4.dstAddr: lpm; // Longest Prefix Match on Destination IP
         }
         actions = {
-            ipv4_forward;
-            drop;
-            NoAction;
+            ipv4_forward;   // Forward the packet
+            drop;           // Drop the packet
+            NoAction;       // Do nothing (packet continues)
         }
-        size = 1024;
-        default_action = NoAction();
+        size = 1024; // Example size
+        // Default action if no entry matches.
+
+        //default_action = NoAction();
+        default_action = drop();
     }
-    
+
     apply {
-        /* TODO: fix ingress control logic
-         *  - ipv4_lpm should be applied only when IPv4 header is valid
-         */
-        ipv4_lpm.apply();
+        // Only process IPv4 packets with the routing table
+        if (hdr.ipv4.isValid()) {
+
+            //  Drop the packet if ttl is already 0
+            if (hdr.ipv4.ttl == 0) {
+                drop();
+            } else {
+                // Apply the Match table for routing
+                ipv4_lpm.apply();
+
+                // If the action ipv4_forward was executed and TTL became 0, drop the packet.
+                
+                if (hdr.ipv4.ttl == 0) {
+                    drop();
+                }
+            }
+        }
     }
 }
 
@@ -144,7 +186,11 @@ control MyComputeChecksum(inout headers hdr, inout metadata meta) {
 
 control MyDeparser(packet_out packet, in headers hdr) {
     apply {
-        /* TODO: add deparser logic */
+        // Emit headers in order. Ethernet first.
+        packet.emit(hdr.ethernet);
+        // Emit IPv4 header.
+
+        packet.emit(hdr.ipv4);
     }
 }
 
